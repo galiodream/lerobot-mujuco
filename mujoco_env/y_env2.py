@@ -15,7 +15,8 @@ class SimpleEnv2:
                  xml_path,
                 action_type='eef_pose', 
                 state_type='joint_angle',
-                seed = None):
+                seed = None,
+                initialize_viewer=True):
         """
         args:
             xml_path: str, path to the xml file
@@ -34,17 +35,24 @@ class SimpleEnv2:
                     'joint4',
                     'joint5',
                     'joint6',]
-        self.init_viewer()
+        if initialize_viewer:
+            self.init_viewer()
+        else:
+            self.env.reset()
         self.reset(seed)
 
-    def init_viewer(self):
+    def init_viewer(self, reset_env=True):
         '''
         Initialize the viewer
         '''
-        self.env.reset()
+        if reset_env:
+            self.env.reset()
         self.env.init_viewer(
+            width             = 960,
+            height            = 720,
+            fontscale         = 150,
             distance          = 2.0,
-            elevation         = -30, 
+            elevation         = -30,
             transparent       = False,
             black_sky         = True,
             use_rgb_overlay = False,
@@ -180,10 +188,10 @@ class SimpleEnv2:
         else:
             raise ValueError('state_type not recognized')
 
-    def step_env(self):
-        self.env.step(self.q)
+    def step_env(self, nstep=1):
+        self.env.step(self.q, nstep=nstep)
 
-    def grab_image(self):
+    def grab_image(self, include_side=False):
         '''
         grab images from the environment
         returns:
@@ -194,30 +202,44 @@ class SimpleEnv2:
             cam_name='agentview')
         self.rgb_ego = self.env.get_fixed_cam_rgb(
             cam_name='egocentric')
+        self.rgb_agent_view = add_title_to_img(self.rgb_agent,text='Agent View',shape=(640,480))
+        self.rgb_egocentric_view = add_title_to_img(self.rgb_ego,text='Egocentric View',shape=(640,480))
         # self.rgb_top = self.env.get_fixed_cam_rgbd_pcd(
         #     cam_name='topview')
-        self.rgb_side = self.env.get_fixed_cam_rgb(
-            cam_name='sideview')
+        if include_side:
+            self.rgb_side = self.env.get_fixed_cam_rgb(
+                cam_name='sideview')
+            self.rgb_side_view = add_title_to_img(self.rgb_side,text='Side View',shape=(640,480))
         return self.rgb_agent, self.rgb_ego
+
+    def grab_image_fast(self):
+        """Grab raw camera images without overlay processing (for policy input)."""
+        rgb_agent = self.env.get_fixed_cam_rgb(cam_name='agentview')
+        rgb_ego = self.env.get_fixed_cam_rgb(cam_name='egocentric')
+        return rgb_agent, rgb_ego
         
 
-    def render(self, teleop=False, idx = 0):
+    def render(self, teleop=False, idx = 0, fast=False, show_side_view=False):
         '''
         Render the environment
         '''
+        if fast:
+            self.env.render()
+            return
+
         self.env.plot_time()
         p_current, R_current = self.env.get_pR_body(body_name='tcp_link')
         R_current = R_current @ np.array([[1,0,0],[0,0,1],[0,1,0 ]])
         self.env.plot_sphere(p=p_current, r=0.02, rgba=[0.95,0.05,0.05,0.5])
         self.env.plot_capsule(p=p_current, R=R_current, r=0.01, h=0.2, rgba=[0.05,0.95,0.05,0.5])
-        rgb_egocentric_view = add_title_to_img(self.rgb_ego,text='Egocentric View',shape=(640,480))
-        rgb_agent_view = add_title_to_img(self.rgb_agent,text='Agent View',shape=(640,480))
         self.env.plot_T(p = np.array([0.1,0.0,1.0]), label=f"Episode {idx}", plot_axis=False, plot_sphere=False)
-        self.env.viewer_rgb_overlay(rgb_agent_view,loc='top right')
-        self.env.viewer_rgb_overlay(rgb_egocentric_view,loc='bottom right')
+        if hasattr(self, 'rgb_agent_view') and self.rgb_agent_view is not None:
+            self.env.viewer_rgb_overlay(self.rgb_agent_view,loc='top right')
+        if hasattr(self, 'rgb_egocentric_view') and self.rgb_egocentric_view is not None:
+            self.env.viewer_rgb_overlay(self.rgb_egocentric_view,loc='bottom right')
+        if (teleop or show_side_view) and hasattr(self, 'rgb_side_view') and self.rgb_side_view is not None:
+            self.env.viewer_rgb_overlay(self.rgb_side_view, loc='top left')
         if teleop:
-            rgb_side_view = add_title_to_img(self.rgb_side,text='Side View',shape=(640,480))
-            self.env.viewer_rgb_overlay(rgb_side_view, loc='top left')
             self.env.viewer_text_overlay(text1='Key Pressed',text2='%s'%(self.env.get_key_pressed_list()))
             self.env.viewer_text_overlay(text1='Key Repeated',text2='%s'%(self.env.get_key_repeated_list()))
         if getattr(self, 'instruction', None) is not None:
