@@ -9,6 +9,7 @@ from mujoco_env.transforms import rpy2r, r2rpy
 import os
 import copy
 import glfw
+import mujoco
 
 class SimpleEnv2:
     def __init__(self, 
@@ -115,6 +116,25 @@ class SimpleEnv2:
         self.gripper_state = False
         self.past_chars = []
 
+    def init_offscreen_renderer(self, width=640, height=480):
+        """Initialize a MuJoCo Renderer for headless fixed-camera images."""
+        self.offscreen_renderer = mujoco.Renderer(self.env.model, height=height, width=width)
+        self.offscreen_width = width
+        self.offscreen_height = height
+
+    def close_offscreen_renderer(self):
+        renderer = getattr(self, 'offscreen_renderer', None)
+        if renderer is not None:
+            renderer.close()
+            self.offscreen_renderer = None
+
+    def get_fixed_cam_rgb_offscreen(self, cam_name):
+        renderer = getattr(self, 'offscreen_renderer', None)
+        if renderer is None:
+            raise RuntimeError("Offscreen renderer is not initialized. Call init_offscreen_renderer() first.")
+        renderer.update_scene(self.env.data, camera=cam_name)
+        return renderer.render().copy()
+
     def set_instruction(self, given = None):
         """
         Set the instruction for the task
@@ -198,22 +218,33 @@ class SimpleEnv2:
             rgb_agent: np.array, rgb image from the agent's view
             rgb_ego: np.array, rgb image from the egocentric
         '''
-        self.rgb_agent = self.env.get_fixed_cam_rgb(
-            cam_name='agentview')
-        self.rgb_ego = self.env.get_fixed_cam_rgb(
-            cam_name='egocentric')
+        if getattr(self, 'offscreen_renderer', None) is not None:
+            self.rgb_agent = self.get_fixed_cam_rgb_offscreen(cam_name='agentview')
+            self.rgb_ego = self.get_fixed_cam_rgb_offscreen(cam_name='egocentric')
+        else:
+            self.rgb_agent = self.env.get_fixed_cam_rgb(
+                cam_name='agentview')
+            self.rgb_ego = self.env.get_fixed_cam_rgb(
+                cam_name='egocentric')
         self.rgb_agent_view = add_title_to_img(self.rgb_agent,text='Agent View',shape=(640,480))
         self.rgb_egocentric_view = add_title_to_img(self.rgb_ego,text='Egocentric View',shape=(640,480))
         # self.rgb_top = self.env.get_fixed_cam_rgbd_pcd(
         #     cam_name='topview')
         if include_side:
-            self.rgb_side = self.env.get_fixed_cam_rgb(
-                cam_name='sideview')
+            if getattr(self, 'offscreen_renderer', None) is not None:
+                self.rgb_side = self.get_fixed_cam_rgb_offscreen(cam_name='sideview')
+            else:
+                self.rgb_side = self.env.get_fixed_cam_rgb(
+                    cam_name='sideview')
             self.rgb_side_view = add_title_to_img(self.rgb_side,text='Side View',shape=(640,480))
         return self.rgb_agent, self.rgb_ego
 
     def grab_image_fast(self):
         """Grab raw camera images without overlay processing (for policy input)."""
+        if getattr(self, 'offscreen_renderer', None) is not None:
+            rgb_agent = self.get_fixed_cam_rgb_offscreen(cam_name='agentview')
+            rgb_ego = self.get_fixed_cam_rgb_offscreen(cam_name='egocentric')
+            return rgb_agent, rgb_ego
         rgb_agent = self.env.get_fixed_cam_rgb(cam_name='agentview')
         rgb_ego = self.env.get_fixed_cam_rgb(cam_name='egocentric')
         return rgb_agent, rgb_ego

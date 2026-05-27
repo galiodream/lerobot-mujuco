@@ -4,7 +4,7 @@
     
     <!-- Default options -->
     <!-- <compiler angle="radian" assetdir="./tabletop/mesh" autolimits="true" /> -->
-    <option integrator="RK4" noslip_iterations="20" />
+    <option integrator="Euler" noslip_iterations="10" />
     <default>
         <joint armature="0.1" damping="0.1" />
         <default class="visual_only">

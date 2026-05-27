@@ -7,3 +7,5 @@ omy_pnp
 .venv
 wandb
 omy_pnp_language
+.vscode
+*__pycache__*

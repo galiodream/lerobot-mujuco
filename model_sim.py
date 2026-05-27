@@ -1,3 +1,15 @@
+import os
+
+def _env_bool(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+VIEWER_ENABLED = _env_bool("MODEL_SIM_VIEWER", True)
+if not VIEWER_ENABLED:
+    os.environ.setdefault("MUJOCO_GL", "egl")
+
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 import numpy as np
 from lerobot.common.datasets.utils import write_json, serialize_dict
@@ -10,6 +22,12 @@ import threading
 import time
 from mujoco_env.y_env2 import SimpleEnv2
 xml_path = './asset/example_scene_y2.xml'
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return int(value)
 
 # --- Model selection ---
 MODEL_TYPE = 'pi0'  # 'smolvla' or 'pi0'
@@ -59,26 +77,37 @@ def get_default_transform(image_size: int = 224):
 PnPEnv = SimpleEnv2(xml_path, action_type='joint_angle', seed=0, initialize_viewer=False)
 policy.reset()
 policy.eval()
-print('Opening MuJoCo viewer...', flush=True)
-PnPEnv.init_viewer(reset_env=False)
-for _ in range(15):
-    PnPEnv.env.render()
-    time.sleep(1.0 / 60.0)
+if VIEWER_ENABLED:
+    print('Opening MuJoCo viewer...', flush=True)
+    PnPEnv.init_viewer(reset_env=False)
+    for _ in range(15):
+        PnPEnv.env.render()
+        time.sleep(1.0 / 60.0)
+else:
+    print('Running without MuJoCo viewer; using offscreen renderer for policy images.', flush=True)
+    PnPEnv.init_offscreen_renderer(
+        width=_env_int("MODEL_SIM_CAMERA_WIDTH", 640),
+        height=_env_int("MODEL_SIM_CAMERA_HEIGHT", 480),
+    )
 print('Simulation ready.', flush=True)
 IMG_TRANSFORM = get_default_transform()
 
 # --- Timing configuration ---
 SIM_DT = PnPEnv.env.dt            # MuJoCo physics timestep (e.g. 0.002s)
-RENDER_HZ = 60                     # target render framerate
-POLICY_HZ = 3                      # policy inference rate
-OVERLAY_HZ = 3                     # camera overlay refresh rate (independent of policy)
-MAX_EPISODE_STEPS = 150            # max policy actions per episode (~50s at 3Hz)
+RENDER_HZ = _env_int("MODEL_SIM_RENDER_HZ", 20 if VIEWER_ENABLED else 60)
+POLICY_HZ = _env_int("MODEL_SIM_POLICY_HZ", 3)
+OVERLAY_HZ = _env_int("MODEL_SIM_OVERLAY_HZ", 1)
+MAX_EPISODE_STEPS = _env_int("MODEL_SIM_MAX_EPISODE_STEPS", 150)
+HEADLESS_MAX_FRAMES = _env_int("MODEL_SIM_HEADLESS_MAX_FRAMES", 0)
+RENDER_FAST = _env_bool("MODEL_SIM_RENDER_FAST", False)
+SHOW_SIDE_VIEW = _env_bool("MODEL_SIM_SHOW_SIDE_VIEW", False)
 FRAME_INTERVAL = 1.0 / RENDER_HZ   # ~16.7ms per frame
 # Physics steps per frame so simulation runs near real-time
 PHYSICS_STEPS = max(1, round(FRAME_INTERVAL / SIM_DT))
 
 # Initial overlay image capture (so overlays are visible from frame 1)
-PnPEnv.grab_image(include_side=True)
+if VIEWER_ENABLED and not RENDER_FAST:
+    PnPEnv.grab_image(include_side=SHOW_SIDE_VIEW)
 
 # --- Persistent policy worker (avoids per-cycle thread creation overhead) ---
 policy_data = None
@@ -153,7 +182,7 @@ episode_idx = 0
 
 def reset_episode(reason=''):
     """Reset environment and policy for a new episode."""
-    global episode_step, episode_idx
+    global episode_step, episode_idx, policy_result
     episode_idx += 1
     if reason:
         print(f'Episode {episode_idx}: {reason} (steps={episode_step})', flush=True)
@@ -164,70 +193,78 @@ def reset_episode(reason=''):
         policy_result = None
     policy_done.clear()
 
-while PnPEnv.env.is_viewer_alive():
-    now = time.perf_counter()
+frame_idx = 0
 
-    if now >= next_frame_time:
+try:
+    while PnPEnv.env.is_viewer_alive() if VIEWER_ENABLED else (HEADLESS_MAX_FRAMES <= 0 or frame_idx < HEADLESS_MAX_FRAMES):
+        now = time.perf_counter()
 
-        # 1. Collect & apply latest action BEFORE physics (reduces 1-frame latency)
-        action_applied = False
-        new_action = collect_action()
-        if new_action is not None:
-            action = new_action
-        if action is not None:
-            PnPEnv.step(action)
-            action = None
-            action_applied = True
-            episode_step += 1
+        if now >= next_frame_time:
+            frame_idx += 1
 
-        # 2. Physics stepping
-        PnPEnv.step_env(nstep=PHYSICS_STEPS)
+            # 1. Collect & apply latest action BEFORE physics (reduces 1-frame latency)
+            action_applied = False
+            new_action = collect_action()
+            if new_action is not None:
+                action = new_action
+            if action is not None:
+                PnPEnv.step(action)
+                action = None
+                action_applied = True
+                episode_step += 1
 
-        # 3. Check episode end conditions (after action + physics)
-        episode_done = False
-        if action_applied:
-            if PnPEnv.check_success():
-                reset_episode('SUCCESS')
-                episode_done = True
-            elif episode_step >= MAX_EPISODE_STEPS:
-                reset_episode('TIMEOUT')
-                episode_done = True
+            # 2. Physics stepping
+            PnPEnv.step_env(nstep=PHYSICS_STEPS)
 
-        # 4. Dispatch policy inference when due and worker is idle
-        #    Uses grab_image_fast() — 2 cameras, ~10ms, no overlay side-effect
-        policy_dispatched = False
-        if now >= next_policy_time and not policy_busy:
-            if not episode_done and PnPEnv.check_success():
-                reset_episode('SUCCESS')
-            dispatch_policy(build_policy_input())
-            next_policy_time += 1.0 / POLICY_HZ
-            if next_policy_time < now:
-                next_policy_time = now + 1.0 / POLICY_HZ
-            policy_dispatched = True
+            # 3. Check episode end conditions (after action + physics)
+            episode_done = False
+            if action_applied:
+                if PnPEnv.check_success():
+                    reset_episode('SUCCESS')
+                    episode_done = True
+                elif episode_step >= MAX_EPISODE_STEPS:
+                    reset_episode('TIMEOUT')
+                    episode_done = True
 
-        # 5. Refresh camera overlay images at independent rate
-        #    Skip if policy was just dispatched (avoid double capture in one frame)
-        if not policy_dispatched and now >= next_overlay_time:
-            PnPEnv.grab_image(include_side=True)
-            next_overlay_time += 1.0 / OVERLAY_HZ
-            if next_overlay_time < now:
-                next_overlay_time = now + 1.0 / OVERLAY_HZ
+            # 4. Dispatch policy inference when due and worker is idle
+            #    Uses grab_image_fast() — 2 cameras, ~10ms, no overlay side-effect
+            policy_dispatched = False
+            if now >= next_policy_time and not policy_busy:
+                if not episode_done and PnPEnv.check_success():
+                    reset_episode('SUCCESS')
+                dispatch_policy(build_policy_input())
+                next_policy_time += 1.0 / POLICY_HZ
+                if next_policy_time < now:
+                    next_policy_time = now + 1.0 / POLICY_HZ
+                policy_dispatched = True
 
-        # 6. Render every frame with overlays (uses cached images, cheap blit)
-        PnPEnv.render(fast=False, show_side_view=True, idx=episode_idx)
+            # 5. Refresh camera overlay images at independent rate
+            #    Skip if policy was just dispatched (avoid double capture in one frame)
+            if VIEWER_ENABLED and not RENDER_FAST and not policy_dispatched and now >= next_overlay_time:
+                PnPEnv.grab_image(include_side=SHOW_SIDE_VIEW)
+                next_overlay_time += 1.0 / OVERLAY_HZ
+                if next_overlay_time < now:
+                    next_overlay_time = now + 1.0 / OVERLAY_HZ
 
-        next_frame_time += FRAME_INTERVAL
-        if next_frame_time < now:
-            next_frame_time = now + FRAME_INTERVAL
+            # 6. Render every frame with overlays (uses cached images, cheap blit)
+            if VIEWER_ENABLED:
+                PnPEnv.render(fast=RENDER_FAST, show_side_view=SHOW_SIDE_VIEW, idx=episode_idx)
 
-    # Precise frame pacing: sleep for bulk, spin-wait remainder
-    wait_time = next_frame_time - time.perf_counter()
-    if wait_time > 0.002:
-        time.sleep(wait_time - 0.001)
-    elif wait_time < -FRAME_INTERVAL:
-        next_frame_time = time.perf_counter()
+            next_frame_time += FRAME_INTERVAL
+            if next_frame_time < now:
+                next_frame_time = now + FRAME_INTERVAL
+
+        # Precise frame pacing: sleep for bulk, spin-wait remainder
+        wait_time = next_frame_time - time.perf_counter()
+        if wait_time > 0.002:
+            time.sleep(wait_time - 0.001)
+        elif wait_time < -FRAME_INTERVAL:
+            next_frame_time = time.perf_counter()
+except KeyboardInterrupt:
+    print('Interrupted, shutting down...', flush=True)
 
 # Cleanup
 policy_running = False
 policy_event.set()
 policy_thread.join(timeout=1.0)
+PnPEnv.close_offscreen_renderer()

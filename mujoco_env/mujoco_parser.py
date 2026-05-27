@@ -232,7 +232,7 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
         self.window = glfw.create_window(
             width, height, title, None, None)
         glfw.make_context_current(self.window)
-        glfw.swap_interval(1)
+        glfw.swap_interval(int(os.environ.get("MUJOCO_BENCH_SWAP_INTERVAL", "1")))
 
         framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(
             self.window)

@@ -1,5 +1,4 @@
 import os
-import pyautogui
 import sys
 import time
 import numpy as np
@@ -405,7 +404,11 @@ def get_monitor_size():
     """ 
         Get monitor size
     """
-    w,h = pyautogui.size()
+    try:
+        import pyautogui
+        w,h = pyautogui.size()
+    except Exception:
+        w,h = 1280,720
     return w,h
     
 def get_xml_string_from_path(xml_path):
